@@ -1,14 +1,23 @@
 // For format details, see https://aka.ms/devcontainer.json. For config options, see the
 // README at: https://github.com/devcontainers/templates/tree/main/src/alpine
 {
-	"name": "Debian",
+	"name": "xdp-plus-go",
 	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
 	"image": "mcr.microsoft.com/devcontainers/base:debian",
 	"features": {
 		"ghcr.io/devcontainers/features/go:1": {
 			"version": "latest"
-		},
-		"ghcr.io/jungaretti/features/make:1": {}
+		}
+	},
+	"runArgs": [
+		"--cap-add=NET_ADMIN"
+	],
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-vscode.cpptools-extension-pack"
+			]
+		}
 	}
 
 	// Features to add to the dev container. More info: https://containers.dev/features.
