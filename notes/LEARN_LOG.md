@@ -16,44 +16,68 @@ ssh into the devcontainer. it runs privileged so it should be able to do this st
 
 in order to test things, we bind to fake interfaces (veth interfaces).
 
-```bash
-ip link add yap0 type veth peer name yap1 
-ip link set yap0 up && ip link set yap1 up
-```
+use the mounted xdp tutorial testbed in `/tutorial/testenv` or just use `t` in the terminal.
 
-running `ifconfig` should give you the following:
+create a test env:
 
 ```bash
-[...]
-yap0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
-        inet6 fe80::acfa:76ff:fe45:8457  prefixlen 64  scopeid 0x20<link>
-        ether ae:fa:76:45:84:57  txqueuelen 1000  (Ethernet)
-        RX packets 3  bytes 266 (266.0 B)
-        RX errors 0  dropped 0  overruns 0  frame 0
-        TX packets 3  bytes 266 (266.0 B)
-        TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0
+$ t setup --legacy-ip
+Setting up new environment 'xdptut-6cfa'
+Setup environment 'xdptut-6cfa' with peer ip fc00:dead:cafe:1::2 and 10.11.1.2.
+Waiting for interface configuration to settle...
 
-yap1: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
-        inet6 fe80::241a:61ff:fe76:77a  prefixlen 64  scopeid 0x20<link>
-        ether 26:1a:61:76:07:7a  txqueuelen 1000  (Ethernet)
-        RX packets 3  bytes 266 (266.0 B)
-        RX errors 0  dropped 0  overruns 0  frame 0
-        TX packets 3  bytes 266 (266.0 B)
-        TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0
+Running ping from inside test environment:
+
+PING fc00:dead:cafe:1::1 (fc00:dead:cafe:1::1) 56 data bytes
+64 bytes from fc00:dead:cafe:1::1: icmp_seq=1 ttl=64 time=0.111 ms
+
+--- fc00:dead:cafe:1::1 ping statistics ---
+1 packets transmitted, 1 received, 0% packet loss, time 0ms
+rtt min/avg/max/mdev = 0.111/0.111/0.111/0.000 ms
 ```
 
-let's assign them IPs:
+a small architecture diagram:
+
+```
++-------------------------------------------+
+| your container                            |
+|                                           |
+|                    +--------------------+ |
+|                    | namespace          | |
+|                    |                    | |
+|         packets    |                    | |
+|       +------------+-veth0 interface    | |
+|       v            | ---------------    | |
+|  xdptut-4fc0       |                    | |
+|  interface         |                    | |
+|  -----------       |                    | |
+|           ^        +--------------------+ |
+|           |                               |
+|           |                               |
+|           +- this will be your            |
+|              XDP attachment point         |
+|                                           |
++-------------------------------------------+
+```
+
+the `xdptut-xxxx` interface is called the "outer" interface.
+
+
+in a separate container, enter the test environment:
 
 ```bash
-ip addr add 192.168.1.1/24 dev yap0
-ip addr add 192.168.1.2/24 dev yap1
+$ t enter
+$ ping 10.11.1.1
+PING 10.11.1.1 (10.11.1.1) 56(84) bytes of data.
+64 bytes from 10.11.1.1: icmp_seq=1 ttl=64 time=0.392 ms
+64 bytes from 10.11.1.1: icmp_seq=2 ttl=64 time=0.203 ms
+64 bytes from 10.11.1.1: icmp_seq=3 ttl=64 time=0.294 ms
+64 bytes from 10.11.1.1: icmp_seq=4 ttl=64 time=0.047 ms
+^C
+--- 10.11.1.1 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3083ms
+rtt min/avg/max/mdev = 0.047/0.234/0.392/0.126 ms
 ```
-
-now let's yap on these interfaces :) 
-install netcat using `apt install netcat-openbsd`.
-on one terminal listen on port 4444 using `netcat -l 4444` 
-and on the other run `nc 192.168.1.2 4444` to transmit whatever.
-make sure it appears on the other side.
 
 ## day 2: compiling things
 
@@ -146,42 +170,80 @@ Interface        Prio  Program name      Mode     ID   Tag               Chain a
 --------------------------------------------------------------------------------------
 lo                     <No XDP program loaded!>
 yap1                   <No XDP program loaded!>
-yap0                   <No XDP program loaded!>
+xdptut-4fc0            <No XDP program loaded!>
 eth0                   <No XDP program loaded!>
 ```
 
 load in our XDP program:
 
 ```bash
-$ xdp-loader load -m native -s xdp yap0 xdp_pass.o
+$ xdp-loader load -m native -s xdp xdptut-4fc0 xdp_pass.o
 $ xdp-loader status
 CURRENT XDP PROGRAM STATUS:
 
 Interface        Prio  Program name      Mode     ID   Tag               Chain actions
 --------------------------------------------------------------------------------------
 lo                     <No XDP program loaded!>
-yap1                   <No XDP program loaded!>
-yap0                   xdp_dispatcher    native   162  4d7e87c0d30db711
+xdptut-4fc0            xdp_dispatcher    native   162  4d7e87c0d30db711
  =>              50     xdp_pass                  171  3b185187f1855c4c  XDP_PASS
 eth0                   <No XDP program loaded!>
 ```
 
-the netcat stuff from earlier should still work.
+use 
+
 
 to unload:
 
 ```bash
-$ xdp-loader unload --all yap0
+$ xdp-loader unload --all xdptut-4fc0
 $ xdp-loader status
 CURRENT XDP PROGRAM STATUS:
 
 Interface        Prio  Program name      Mode     ID   Tag               Chain actions
 --------------------------------------------------------------------------------------
 lo                     <No XDP program loaded!>
-yap1                   <No XDP program loaded!>
-yap0                   <No XDP program loaded!>
+xdptut-4fc0            <No XDP program loaded!>
 eth0                   <No XDP program loaded!>
 ```
+
+now try the same ping stuff from before and it should just work :)
+
+## day 3: dropping packets indiscriminately
+
+aka 100% accurate DDoS mitigation yippee
+
+compile `xdp_drop.o`:
+
+```bash
+$ make xdp_drop.o
+```
+
+load it in onto the outer interface:
+
+```bash
+$ xdp-loader load -m native -s xdp xdptut-6cfa xdp_drop.o
+$ xdp-loader status
+CURRENT XDP PROGRAM STATUS:
+
+Interface        Prio  Program name      Mode     ID   Tag               Chain actions
+--------------------------------------------------------------------------------------
+lo                     <No XDP program loaded!>
+xdptut-6cfa            xdp_dispatcher    native   112  4d7e87c0d30db711
+ =>              50     xdp_drop                  121  57cd311f2e27366b  XDP_PASS
+eth0                   <No XDP program loaded!>
+```
+
+and `t enter` the network namespace and run a ping:
+
+```bash
+$ ping 10.11.1.1
+PING 10.11.1.1 (10.11.1.1) 56(84) bytes of data.
+^C
+--- 10.11.1.1 ping statistics ---
+8 packets transmitted, 0 received, 100% packet loss, time 7191ms
+```
+
+it doesn't work! as expected.
 
 
 ## resources
