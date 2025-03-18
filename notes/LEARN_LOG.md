@@ -245,6 +245,75 @@ PING 10.11.1.1 (10.11.1.1) 56(84) bytes of data.
 
 it doesn't work! as expected.
 
+note that `ping`s from outside the namespace WILL work:
+
+```bash
+$ ping 10.11.1.1
+PING 10.11.1.1 (10.11.1.1) 56(84) bytes of data.
+64 bytes from 10.11.1.1: icmp_seq=1 ttl=64 time=0.301 ms
+64 bytes from 10.11.1.1: icmp_seq=2 ttl=64 time=0.074 ms
+64 bytes from 10.11.1.1: icmp_seq=3 ttl=64 time=0.068 ms
+64 bytes from 10.11.1.1: icmp_seq=4 ttl=64 time=0.186 ms
+^C
+--- 10.11.1.1 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3077ms
+rtt min/avg/max/mdev = 0.068/0.157/0.301/0.095 ms
+```
+
+this is because XDP process packets on _ingress_ into the `xdptut-xxxx` interface from the network
+namespace, but not at _egress_ into the namespace.
+
+## day 4: dropping packets selectively (packet parsing)
+
+things get a bit weird here. we're using some linux headers to help with some stuff, but otherwise we are completely parsing the packet from raw bytes :)
+
+the code for this day is `xdp_drop_ipv6_non_tcp.c` (a mouthful, i know).
+
+the key thing to understand is that we parse the packet iteratively, moving from L2 (Ethernet) up the layers in the OSI model.
+to make things easier, we maintain a cursor containing a `void *` (fancy word for "idfk which type") of our current position and of the end, that we pass around everywhere. we increment as we move up the stack. (idk if passing around the end in the cursor is standard, but i liked how it looked so idrc)
+
+there is a generalized process for parsing packets that i've gathered.
+
+1. initialize pointer of header type, set to the current position
+2. perform header struct bounds check (see below)
+3. compute total header size (if variable)
+4. advance cursor by total header size
+5. set function-external struct pointers to the pointer initialized in step 1
+6. return something from the header, usually something to use to determine what you want to do next
+
+what does the header struct bounds check look like? here's an example from ethernet header parsing:
+
+```c
+if (eth + 1 > (struct ethhdr *)nh->end)
+{
+     return -1;
+}
+```
+
+this is saying that if the current location plus the size of 1 instance of `eth` (which is a `ethhdr` in this case and of fixed size) is beyond the end of the packet buffer, we know that we will be out of bounds if we try to access things, so we fail fast.
+
+computing the total header size will depend on the header type. for instance, for IPv4, we use the IHL field to determine the combined size of the standard header + options.
+
+anyways, this is what the program does:
+- parses L2 (Ethernet) headers and determines if the L3 protocol (EtherType) is IPv4.
+     - if not, we immediately return a `XDP_DROP` decision.
+- otherwise, we parse L3 (IPv4) headers and determine if the L4 protocol is TCP.
+     - if not, we immediately return a `XDP_DROP` decision.
+- otherwise, we return an `XDP_PASS` decision.
+
+if we comment out the IPv4 parts, we can test just the L3 protocol checking logic by `ping`ing the IPv6 address inside the namespace:
+
+```bash
+$ ping fc00:dead:cafe:1::1
+PING fc00:dead:cafe:1::1 (fc00:dead:cafe:1::1) 56 data bytes
+^C
+--- fc00:dead:cafe:1::1 ping statistics ---
+2 packets transmitted, 0 received, 100% packet loss, time 1037ms
+```
+
+with the L4 protocol checking logic enabled, we can test the happy path by using `nc -s 10.11.1.1 -l -p 8080 -v` outside the namespace to listen, and `nc -u 10.11.1.1 8080 -v` to connect. (this should work and pass traffic as expected.)
+
+we can add `-u` to test the UDP version to ensure those packets are dropped.
 
 ## resources
 - cool tutorial: https://github.com/xdp-project/xdp-tutorial/blob/main/packet01-parsing/README.org
